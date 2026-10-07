@@ -1,6 +1,7 @@
 #include "command_processor.hpp"
 
 #include "../gfx/depth_peek.hpp"
+#include "../gfx/hash.hpp"
 #include "../gfx/recording.hpp"
 #include "../internal.hpp"
 #include "dolphin/gd/GDGeometry.h"
@@ -11,6 +12,7 @@
 #include "shader_info.hpp"
 #include "texture.hpp"
 
+#include <absl/container/flat_hash_map.h>
 #include <tracy/Tracy.hpp>
 
 #include <algorithm>
@@ -22,6 +24,32 @@
 namespace aurora::gx::fifo {
 namespace {
 constexpr Module Log{"aurora::gx::fifo"};
+
+// Vertex arrays already uploaded to storage this frame, keyed by content hash and size.
+// Each attribute caches only the range of the array bound last, so a game that switches an
+// attribute back and forth between arrays (Metroid Prime switches TEX0 between a model's packed
+// and float UVs per material) re-uploads the whole array on every switch and can overflow the
+// fixed-size storage buffer. Keyed by content rather than pointer because games refill the same
+// buffer with new data (streamed and skinned geometry). Small arrays are cheaper to re-upload
+// than to hash and track.
+constexpr u32 MinDedupedArraySize = 4096;
+absl::flat_hash_map<std::pair<HashType, u32>, gfx::Range> sUploadedArrays;
+
+gfx::Range push_array(const AttrArray& array) noexcept {
+  const auto* data = static_cast<const uint8_t*>(array.data);
+  if (array.size < MinDedupedArraySize) {
+    return gfx::push_storage(data, array.size);
+  }
+  const std::pair key{xxh3_hash_s(data, array.size), array.size};
+  if (const auto it = sUploadedArrays.find(key); it != sUploadedArrays.end()) {
+    return it->second;
+  }
+  const auto range = gfx::push_storage(data, array.size);
+  if (range.size != 0) {
+    sUploadedArrays.emplace(key, range);
+  }
+  return range;
+}
 
 u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) noexcept {
   u16 numIndices = 0;
@@ -391,7 +419,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     }
     auto& array = state.arrays[i];
     if (array.cachedRange.size == 0) {
-      array.cachedRange = gfx::push_storage(static_cast<const uint8_t*>(array.data), array.size);
+      array.cachedRange = push_array(array);
     }
     immediates.arrayStart[i - GX_VA_POS] = array.cachedRange.offset;
   }
@@ -768,6 +796,7 @@ void clear_draw_cache() noexcept {
   sDrawCache.uniformRange = {};
   sDrawCache.fogRange = {};
   sDrawCache.hasFogRange = false;
+  sUploadedArrays.clear();
 }
 
 } // namespace aurora::gx::fifo
