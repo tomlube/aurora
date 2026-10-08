@@ -55,9 +55,10 @@ struct FrameRecorder {
   ClipRect cachedScissor;
   bool suppressRenderWorker = false;
   bool normalRequested = false;
-  // Uniform and storage data pushed this frame, by content hash, so identical data shares one range.
+  // Uniform blocks pushed this frame by content hash, and vertex arrays by where they came from, so
+  // identical data shares one range.
   absl::flat_hash_map<HashType, Range> uniformCache;
-  absl::flat_hash_map<HashType, Range> storageCache;
+  absl::flat_hash_map<std::pair<const uint8_t*, size_t>, Range> storageCache;
   Range lastUniform;
   bool uniformOverflowWarned = false;
   bool storageOverflowWarned = false;
@@ -294,11 +295,12 @@ Range push(ByteBuffer& target, const uint8_t* data, size_t length, size_t alignm
   return {static_cast<uint32_t>(begin), static_cast<uint32_t>(length)};
 }
 
-// The range of identical data already pushed to `target` this frame, if any. The bytes are
-// compared too, so a hash collision never hands out the wrong data.
-std::optional<Range> find_pushed(const absl::flat_hash_map<HashType, Range>& cache, ByteBuffer& target,
-                                 HashType hash, const uint8_t* data, size_t length) {
-  const auto it = cache.find(hash);
+// The range of identical data already pushed to `target` this frame under `key`, if any. The bytes
+// are compared too, so a hash collision or memory written again since never hands out stale data.
+template <typename Key>
+std::optional<Range> find_pushed(const absl::flat_hash_map<Key, Range>& cache, ByteBuffer& target, const Key& key,
+                                 const uint8_t* data, size_t length) {
+  const auto it = cache.find(key);
   if (it == cache.end() || it->second.size != length ||
       std::memcmp(target.data() + it->second.offset, data, length) != 0) {
     return std::nullopt;
@@ -1255,9 +1257,10 @@ Range push_storage(const uint8_t* data, size_t length) {
   auto& storage = current_frame_packet().storage;
 
   // Vertex arrays are pushed again whenever a different one was bound in between, so draws that
-  // alternate between arrays (map rooms sorted back to front) copy the same data many times.
-  const HashType hash = xxh3_hash_s(data, length);
-  if (const auto cached = find_pushed(g_recorder.storageCache, storage, hash, data, length)) {
+  // alternate between arrays (map rooms sorted back to front) copy the same data many times. Look
+  // them up by address, which costs one compare of the bytes rather than hashing them as well.
+  const std::pair key{data, length};
+  if (const auto cached = find_pushed(g_recorder.storageCache, storage, key, data, length)) {
     return *cached;
   }
 
@@ -1273,7 +1276,7 @@ Range push_storage(const uint8_t* data, size_t length) {
   }
 
   const Range range = push(storage, data, length, alignment);
-  g_recorder.storageCache.insert_or_assign(hash, range);
+  g_recorder.storageCache.insert_or_assign(key, range);
   return range;
 }
 
