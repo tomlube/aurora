@@ -334,7 +334,8 @@ private:
       m_owned = true;
     } else if (size > m_capacity) {
       if (!m_owned) {
-        abort();
+        // A frame's staging buffers are mapped at a fixed size (gfx/resources.hpp) and can't grow.
+        Module{"aurora::ByteBuffer"}.fatal("fixed {} byte buffer overflowed: {} bytes needed", m_capacity, size);
       }
       if (size < m_capacity * 2) {
         size = m_capacity * 2;
