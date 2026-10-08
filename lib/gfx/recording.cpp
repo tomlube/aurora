@@ -56,9 +56,15 @@ struct FrameRecorder {
   bool suppressRenderWorker = false;
   bool normalRequested = false;
   // Uniform blocks pushed this frame by content hash, and vertex arrays by where they came from, so
-  // identical data shares one range.
-  absl::flat_hash_map<HashType, Range> uniformCache;
-  absl::flat_hash_map<std::pair<const uint8_t*, size_t>, Range> storageCache;
+  // identical data shares one range. Neither cache ever reads the frame's buffers back: they are
+  // mapped upload memory, which the CPU writes quickly but reads uncached and very slowly.
+  struct PushedStorage {
+    Range range;
+    XXH64_hash_t hash = 0;
+    bool hashed = false; // The hash is only taken from an address's second push on.
+  };
+  absl::flat_hash_map<XXH64_hash_t, Range> uniformCache;
+  absl::flat_hash_map<std::pair<const uint8_t*, size_t>, PushedStorage> storageCache;
   Range lastUniform;
   bool uniformOverflowWarned = false;
   bool storageOverflowWarned = false;
@@ -295,17 +301,14 @@ Range push(ByteBuffer& target, const uint8_t* data, size_t length, size_t alignm
   return {static_cast<uint32_t>(begin), static_cast<uint32_t>(length)};
 }
 
-// The range of identical data already pushed to `target` this frame under `key`, if any. The bytes
-// are compared too, so a hash collision or memory written again since never hands out stale data.
-template <typename Key>
-std::optional<Range> find_pushed(const absl::flat_hash_map<Key, Range>& cache, ByteBuffer& target, const Key& key,
-                                 const uint8_t* data, size_t length) {
-  const auto it = cache.find(key);
-  if (it == cache.end() || it->second.size != length ||
-      std::memcmp(target.data() + it->second.offset, data, length) != 0) {
-    return std::nullopt;
-  }
-  return it->second;
+// Clears a per-frame cache for the next frame. absl frees a cleared table's storage once it has
+// grown past a trivial size, so it is sized for the frame just recorded up front rather than
+// regrown draw by draw.
+template <typename Cache>
+void reset_frame_cache(Cache& cache) {
+  const size_t entries = cache.size();
+  cache.clear();
+  cache.reserve(entries);
 }
 
 Range map(ByteBuffer& target, size_t length, size_t alignment) {
@@ -593,8 +596,8 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   g_recorder.drawCallCount = 0;
   g_recorder.mergedDrawCallCount = 0;
   g_recorder.suspendedEfbPass.reset();
-  g_recorder.uniformCache.clear();
-  g_recorder.storageCache.clear();
+  reset_frame_cache(g_recorder.uniformCache);
+  reset_frame_cache(g_recorder.storageCache);
   g_recorder.lastUniform = {};
   g_recorder.uniformOverflowWarned = false;
   g_recorder.storageOverflowWarned = false;
@@ -1222,10 +1225,11 @@ Range push_uniform(const uint8_t* data, size_t length) {
 
   // Draws that only flip between a few states (a map drawing hundreds of rooms in a couple of
   // colors each) push the same blocks over and over. Reuse a block already in this frame's buffer.
-  const HashType hash = xxh3_hash_s(data, length);
-  if (const auto cached = find_pushed(g_recorder.uniformCache, uniforms, hash, data, length)) {
-    g_recorder.lastUniform = *cached;
-    return *cached;
+  // The 64-bit hash alone decides a match; the pushed bytes are never read back to confirm it.
+  const XXH64_hash_t hash = XXH3_64bits(data, length);
+  if (const auto it = g_recorder.uniformCache.find(hash); it != g_recorder.uniformCache.end()) {
+    g_recorder.lastUniform = it->second;
+    return it->second;
   }
 
   // The frame's uniform buffer has a fixed size. Every binding reads MaxUniformSize bytes from its
@@ -1257,11 +1261,19 @@ Range push_storage(const uint8_t* data, size_t length) {
   auto& storage = current_frame_packet().storage;
 
   // Vertex arrays are pushed again whenever a different one was bound in between, so draws that
-  // alternate between arrays (map rooms sorted back to front) copy the same data many times. Look
-  // them up by address, which costs one compare of the bytes rather than hashing them as well.
-  const std::pair key{data, length};
-  if (const auto cached = find_pushed(g_recorder.storageCache, storage, key, data, length)) {
-    return *cached;
+  // alternate between arrays (map rooms sorted back to front, a room's sorted surfaces) would copy
+  // the same data many times. They are looked up by address, and because that memory may have been
+  // rewritten since (skinning workspaces), a match is confirmed by hashing the source data. The hash
+  // is only taken from an address's second push on, so an array pushed once a frame costs no more
+  // than the copy, and one pushed twice costs the two copies it always did plus one hash.
+  auto& entry = g_recorder.storageCache[std::pair{data, length}];
+  const bool pushedBefore = entry.range.size != 0;
+  XXH64_hash_t hash = 0;
+  if (pushedBefore) {
+    hash = XXH3_64bits(data, length);
+    if (entry.hashed && entry.hash == hash) {
+      return entry.range;
+    }
   }
 
   // When the frame's storage buffer is full, return an empty range; the draw that needed it is
@@ -1275,9 +1287,10 @@ Range push_storage(const uint8_t* data, size_t length) {
     return {};
   }
 
-  const Range range = push(storage, data, length, alignment);
-  g_recorder.storageCache.insert_or_assign(key, range);
-  return range;
+  entry.range = push(storage, data, length, alignment);
+  entry.hash = hash;
+  entry.hashed = pushedBefore;
+  return entry.range;
 }
 
 Range push_texture_data(const uint8_t* data, u32 bytesPerRow, u32 rowsPerImage) {
