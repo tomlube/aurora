@@ -55,10 +55,12 @@ struct FrameRecorder {
   ClipRect cachedScissor;
   bool suppressRenderWorker = false;
   bool normalRequested = false;
-  // Uniform blocks pushed this frame, by content hash, so identical blocks share one range.
+  // Uniform and storage data pushed this frame, by content hash, so identical data shares one range.
   absl::flat_hash_map<HashType, Range> uniformCache;
+  absl::flat_hash_map<HashType, Range> storageCache;
   Range lastUniform;
   bool uniformOverflowWarned = false;
+  bool storageOverflowWarned = false;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> debugGroupStack;
 #endif
@@ -290,6 +292,18 @@ Range push(ByteBuffer& target, const uint8_t* data, size_t length, size_t alignm
     target.append(data, length);
   }
   return {static_cast<uint32_t>(begin), static_cast<uint32_t>(length)};
+}
+
+// The range of identical data already pushed to `target` this frame, if any. The bytes are
+// compared too, so a hash collision never hands out the wrong data.
+std::optional<Range> find_pushed(const absl::flat_hash_map<HashType, Range>& cache, ByteBuffer& target,
+                                 HashType hash, const uint8_t* data, size_t length) {
+  const auto it = cache.find(hash);
+  if (it == cache.end() || it->second.size != length ||
+      std::memcmp(target.data() + it->second.offset, data, length) != 0) {
+    return std::nullopt;
+  }
+  return it->second;
 }
 
 Range map(ByteBuffer& target, size_t length, size_t alignment) {
@@ -578,8 +592,10 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   g_recorder.mergedDrawCallCount = 0;
   g_recorder.suspendedEfbPass.reset();
   g_recorder.uniformCache.clear();
+  g_recorder.storageCache.clear();
   g_recorder.lastUniform = {};
   g_recorder.uniformOverflowWarned = false;
+  g_recorder.storageOverflowWarned = false;
 
   current_render_passes().emplace_back();
   auto& pass = current_render_passes()[0];
@@ -1205,11 +1221,9 @@ Range push_uniform(const uint8_t* data, size_t length) {
   // Draws that only flip between a few states (a map drawing hundreds of rooms in a couple of
   // colors each) push the same blocks over and over. Reuse a block already in this frame's buffer.
   const HashType hash = xxh3_hash_s(data, length);
-  const auto cached = g_recorder.uniformCache.find(hash);
-  if (cached != g_recorder.uniformCache.end() && cached->second.size == length &&
-      std::memcmp(uniforms.data() + cached->second.offset, data, length) == 0) {
-    g_recorder.lastUniform = cached->second;
-    return cached->second;
+  if (const auto cached = find_pushed(g_recorder.uniformCache, uniforms, hash, data, length)) {
+    g_recorder.lastUniform = *cached;
+    return *cached;
   }
 
   // The frame's uniform buffer has a fixed size. Every binding reads MaxUniformSize bytes from its
@@ -1238,7 +1252,29 @@ Range push_storage(const uint8_t* data, size_t length) {
   if (!check_recording("push_storage")) {
     return {};
   }
-  return push(current_frame_packet().storage, data, length, resources().limits.minStorageBufferOffsetAlignment);
+  auto& storage = current_frame_packet().storage;
+
+  // Vertex arrays are pushed again whenever a different one was bound in between, so draws that
+  // alternate between arrays (map rooms sorted back to front) copy the same data many times.
+  const HashType hash = xxh3_hash_s(data, length);
+  if (const auto cached = find_pushed(g_recorder.storageCache, storage, hash, data, length)) {
+    return *cached;
+  }
+
+  // When the frame's storage buffer is full, return an empty range; the draw that needed it is
+  // skipped rather than ending the program.
+  const size_t alignment = resources().limits.minStorageBufferOffsetAlignment;
+  if (!storage.owned() && AURORA_ALIGN(storage.size(), alignment) + length > storage.capacity()) {
+    if (!g_recorder.storageOverflowWarned) {
+      g_recorder.storageOverflowWarned = true;
+      Log.warn("Storage buffer full ({} bytes); skipping draws for the rest of the frame", storage.capacity());
+    }
+    return {};
+  }
+
+  const Range range = push(storage, data, length, alignment);
+  g_recorder.storageCache.insert_or_assign(hash, range);
+  return range;
 }
 
 Range push_texture_data(const uint8_t* data, u32 bytesPerRow, u32 rowsPerImage) {
