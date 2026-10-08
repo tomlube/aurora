@@ -2,6 +2,7 @@
 
 #include "encoding.hpp"
 #include "frame.hpp"
+#include "hash.hpp"
 #include "resource_cache.hpp"
 
 #include "clear.hpp"
@@ -54,6 +55,10 @@ struct FrameRecorder {
   ClipRect cachedScissor;
   bool suppressRenderWorker = false;
   bool normalRequested = false;
+  // Uniform blocks pushed this frame, by content hash, so identical blocks share one range.
+  absl::flat_hash_map<HashType, Range> uniformCache;
+  Range lastUniform;
+  bool uniformOverflowWarned = false;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> debugGroupStack;
 #endif
@@ -572,6 +577,9 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   g_recorder.drawCallCount = 0;
   g_recorder.mergedDrawCallCount = 0;
   g_recorder.suspendedEfbPass.reset();
+  g_recorder.uniformCache.clear();
+  g_recorder.lastUniform = {};
+  g_recorder.uniformOverflowWarned = false;
 
   current_render_passes().emplace_back();
   auto& pass = current_render_passes()[0];
@@ -1192,7 +1200,37 @@ Range push_uniform(const uint8_t* data, size_t length) {
   if (!check_recording("push_uniform")) {
     return {};
   }
-  return push(current_frame_packet().uniforms, data, length, resources().limits.minUniformBufferOffsetAlignment);
+  auto& uniforms = current_frame_packet().uniforms;
+
+  // Draws that only flip between a few states (a map drawing hundreds of rooms in a couple of
+  // colors each) push the same blocks over and over. Reuse a block already in this frame's buffer.
+  const HashType hash = xxh3_hash_s(data, length);
+  const auto cached = g_recorder.uniformCache.find(hash);
+  if (cached != g_recorder.uniformCache.end() && cached->second.size == length &&
+      std::memcmp(uniforms.data() + cached->second.offset, data, length) == 0) {
+    g_recorder.lastUniform = cached->second;
+    return cached->second;
+  }
+
+  // The frame's uniform buffer has a fixed size. Every binding reads MaxUniformSize bytes from its
+  // offset (finish() pads the end for that), so keep that much free. When a frame runs out, its
+  // remaining draws reuse the last block rather than ending the program; they may draw in the
+  // wrong colors for that frame.
+  const size_t alignment = resources().limits.minUniformBufferOffsetAlignment;
+  if (!uniforms.owned() &&
+      AURORA_ALIGN(uniforms.size(), alignment) + length + gx::MaxUniformSize > uniforms.capacity()) {
+    if (!g_recorder.uniformOverflowWarned) {
+      g_recorder.uniformOverflowWarned = true;
+      Log.warn("Uniform buffer full ({} bytes); reusing the last block for the rest of the frame",
+               uniforms.capacity());
+    }
+    return g_recorder.lastUniform;
+  }
+
+  const Range range = push(uniforms, data, length, alignment);
+  g_recorder.uniformCache.insert_or_assign(hash, range);
+  g_recorder.lastUniform = range;
+  return range;
 }
 
 Range push_storage(const uint8_t* data, size_t length) {
