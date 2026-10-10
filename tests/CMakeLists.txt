@@ -55,6 +55,9 @@ target_include_directories(pad_adapter_tests PRIVATE
 target_link_libraries(pad_adapter_tests PRIVATE aurora::pad gtest gtest_main)
 if (AURORA_ENABLE_GX)
   target_link_libraries(pad_adapter_tests PRIVATE aurora::gx aurora::vi)
+  if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(pad_adapter_tests PRIVATE $<LINK_GROUP:RESCAN,aurora::gx,aurora::vi,aurora::core>)
+  endif ()
 endif ()
 aurora_copy_runtime_dlls(pad_adapter_tests)
 gtest_discover_tests(pad_adapter_tests)
@@ -80,7 +83,7 @@ target_include_directories(os_time_tests PRIVATE
   ../include
   ../lib
 )
-target_compile_definitions(os_time_tests PRIVATE AURORA TARGET_PC)
+target_compile_definitions(os_time_tests PRIVATE AURORA TARGET_PC=1)
 target_link_libraries(os_time_tests PRIVATE fmt::fmt gtest gtest_main)
 gtest_discover_tests(os_time_tests)
 
@@ -127,7 +130,7 @@ if (AURORA_ENABLE_GX)
     ../lib/dolphin/gx
   )
 
-  target_compile_definitions(gx_fifo_tests PRIVATE AURORA TARGET_PC)
+  target_compile_definitions(gx_fifo_tests PRIVATE AURORA TARGET_PC=1)
 
   target_link_libraries(gx_fifo_tests PRIVATE
     gtest
@@ -152,7 +155,7 @@ if (AURORA_ENABLE_GX)
     ../include
     ../lib
   )
-  target_compile_definitions(gx_texture_cache_tests PRIVATE AURORA TARGET_PC)
+  target_compile_definitions(gx_texture_cache_tests PRIVATE AURORA TARGET_PC=1)
   target_link_libraries(gx_texture_cache_tests PRIVATE
     gtest
     gtest_main
@@ -166,6 +169,11 @@ if (AURORA_ENABLE_GX)
   aurora_copy_runtime_dlls(gx_texture_cache_tests)
   gtest_discover_tests(gx_texture_cache_tests)
 
+  add_executable(lru_cache_tests lru_cache_test.cpp)
+  target_include_directories(lru_cache_tests PRIVATE ../lib)
+  target_link_libraries(lru_cache_tests PRIVATE gtest gtest_main absl::flat_hash_map)
+  gtest_discover_tests(lru_cache_tests)
+
   add_executable(texture_replacement_streaming_tests
     texture_replacement_streaming_test.cpp
   )
@@ -173,7 +181,7 @@ if (AURORA_ENABLE_GX)
     ../include
     ../lib
   )
-  target_compile_definitions(texture_replacement_streaming_tests PRIVATE AURORA TARGET_PC)
+  target_compile_definitions(texture_replacement_streaming_tests PRIVATE AURORA TARGET_PC=1)
   target_link_libraries(texture_replacement_streaming_tests PRIVATE
     aurora::gx
     aurora::vi
@@ -193,7 +201,7 @@ if (AURORA_ENABLE_GX)
     ../include
     ../lib
   )
-  target_compile_definitions(render_worker_tests PRIVATE AURORA TARGET_PC)
+  target_compile_definitions(render_worker_tests PRIVATE AURORA TARGET_PC=1)
   target_link_libraries(render_worker_tests PRIVATE
     gtest
     gtest_main
@@ -210,10 +218,11 @@ if (AURORA_ENABLE_GX)
     ../include
     ../lib
   )
-  target_compile_definitions(gfx_recording_tests PRIVATE AURORA TARGET_PC)
+  target_compile_definitions(gfx_recording_tests PRIVATE AURORA TARGET_PC=1)
   target_link_libraries(gfx_recording_tests PRIVATE
     aurora::gx
     aurora::vi
+    absl::flat_hash_map
     gtest
     gtest_main
   )
@@ -248,6 +257,6 @@ add_executable(os_alloc_tests
 target_include_directories(os_alloc_tests PRIVATE
   ../include
 )
-target_compile_definitions(os_alloc_tests PRIVATE AURORA TARGET_PC)
+target_compile_definitions(os_alloc_tests PRIVATE AURORA TARGET_PC=1)
 target_link_libraries(os_alloc_tests PRIVATE gtest gtest_main fmt::fmt)
 gtest_discover_tests(os_alloc_tests)
