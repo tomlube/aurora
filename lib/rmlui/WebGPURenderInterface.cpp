@@ -380,8 +380,14 @@ void queue_texture_upload_if_needed(ShaderTextureData& texture) {
         .mipLevel = mipLevel,
         .aspect = wgpu::TextureAspect::All,
     };
-    gfx::queue_texture_upload_data(texPtr, texture.m_bytesPerPixel * width, height, dst,
-                                   {width, height, texture.m_size.depthOrArrayLayers});
+    // Write directly through the queue rather than the frame's staging buffer: on Vulkan (Adreno 540), uploads
+    // staged in the first frames after startup arrive empty, leaving untextured geometry and early glyphs invisible.
+    const wgpu::TexelCopyBufferLayout layout{
+        .bytesPerRow = texture.m_bytesPerPixel * width,
+        .rowsPerImage = height,
+    };
+    const wgpu::Extent3D extent{width, height, texture.m_size.depthOrArrayLayers};
+    webgpu::g_queue.WriteTexture(&dst, texPtr, layerSize, &layout, &extent);
 
     texPtr += layerSize;
 
