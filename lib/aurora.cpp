@@ -237,8 +237,10 @@ bool begin_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
   {
-    if (!window::is_presentable()) {
+    if (window::surface_needs_release()) {
       webgpu::release_surface();
+    }
+    if (!window::is_presentable()) {
       return false;
     }
     if (window::is_paused()) {
@@ -291,6 +293,7 @@ void end_frame() noexcept {
     wgpu::Texture currentTexture;
     wgpu::TextureView currentView;
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
+    bool acquireAttempted = false;
     {
       window::SurfaceLock surfaceLock;
       if (window::is_presentable() && g_surface) {
@@ -298,6 +301,7 @@ void end_frame() noexcept {
         wgpu::SurfaceTexture surfaceTexture;
         g_surface.GetCurrentTexture(&surfaceTexture);
         surfaceStatus = surfaceTexture.status;
+        acquireAttempted = true;
         if (surfaceStatus == wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal) {
           currentTexture = std::move(surfaceTexture.texture);
           currentView = currentTexture.CreateView();
@@ -377,19 +381,27 @@ void end_frame() noexcept {
     if (canPresent && g_surface) {
       ZoneScopedN("Present");
       wgpu::ConvertibleStatus status = wgpu::Status::Error;
+      bool presentAttempted = false;
       {
         window::SurfaceLock surfaceLock;
         if (window::is_presentable()) {
           status = g_surface.Present();
+          presentAttempted = true;
         }
       }
       if (status) {
         gfx::after_present();
-      } else {
+      } else if (presentAttempted) {
         Log.warn("Surface present failed");
         webgpu::release_surface();
+      } else if (window::surface_needs_release()) {
+        // Window became unpresentable after acquire; a resize keeps the surface (see below).
+        webgpu::release_surface();
       }
-    } else if (g_surface) {
+    } else if (g_surface && acquireAttempted) {
+      // Only act on a status we actually got back. If the window stopped being presentable (e.g. an
+      // Android surfaceChanged mid-frame), dropping the surface here makes the next frame create a
+      // second VkSurfaceKHR on the same ANativeWindow, which fails with NATIVE_WINDOW_IN_USE.
       switch (surfaceStatus) {
       case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
         Log.warn("Surface texture acquisition timed out");
@@ -408,7 +420,7 @@ void end_frame() noexcept {
         g_surface = {};
         break;
       default:
-        if (!window::is_presentable()) {
+        if (window::surface_needs_release()) {
           webgpu::release_surface();
         } else {
           Log.error("Failed to get surface texture: {}", magic_enum::enum_name(surfaceStatus));

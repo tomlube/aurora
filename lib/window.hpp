@@ -41,6 +41,10 @@ SDL_Renderer* get_sdl_renderer();
 bool is_paused() noexcept;
 bool is_presentable() noexcept;
 void set_surface_ready(bool ready) noexcept;
+void set_surface_resizing(bool resizing) noexcept;
+// Whether the GPU surface has to be dropped: the native window is gone or new, or the app is backgrounded.
+bool surface_needs_release() noexcept;
+void clear_surface_lost() noexcept;
 void set_title(const char* title);
 void set_fullscreen(bool fullscreen);
 bool get_fullscreen();

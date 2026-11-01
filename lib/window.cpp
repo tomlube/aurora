@@ -56,6 +56,11 @@ std::atomic_bool g_surfaceReady = false;
 #else
 std::atomic_bool g_surfaceReady = true;
 #endif
+// Android surfaceChanged (a resize) keeps the native window, so the GPU surface must survive it: on Vulkan,
+// creating a second VkSurfaceKHR on the same ANativeWindow fails with NATIVE_WINDOW_IN_USE.
+std::atomic_bool g_surfaceResizing = false;
+// Set when the native window was created or destroyed; cleared once the GPU surface is released.
+std::atomic_bool g_surfaceLost = false;
 bool g_lastPaused = false;
 bool g_gotFocus = false;
 
@@ -535,9 +540,27 @@ bool is_presentable() noexcept {
 }
 
 void set_surface_ready(bool ready) noexcept {
+  if (!ready && !g_surfaceResizing.load(std::memory_order_acquire)) {
+    g_surfaceLost.store(true, std::memory_order_release);
+  }
   g_surfaceReady.store(ready, std::memory_order_release);
   time::internal::set_pause_reason(time::internal::PauseReason::Surface, !ready);
 }
+
+void set_surface_resizing(bool resizing) noexcept { g_surfaceResizing.store(resizing, std::memory_order_release); }
+
+bool surface_needs_release() noexcept {
+  if (g_surfaceLost.load(std::memory_order_acquire)) {
+    return true;
+  }
+  if (is_presentable() || g_surfaceResizing.load(std::memory_order_acquire)) {
+    return false;
+  }
+  // Check again in case a resize finished between the two loads above.
+  return !is_presentable();
+}
+
+void clear_surface_lost() noexcept { g_surfaceLost.store(false, std::memory_order_release); }
 
 SurfaceLock::SurfaceLock() noexcept {
 #if defined(SDL_PLATFORM_ANDROID)
@@ -620,5 +643,10 @@ void set_background_input(bool value) { SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACK
 extern "C" JNIEXPORT void JNICALL Java_dev_encounter_aurora_AuroraSurface_nativeSetSurfaceReady(JNIEnv*, jclass,
                                                                                                 jboolean ready) {
   aurora::window::set_surface_ready(ready == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_dev_encounter_aurora_AuroraSurface_nativeSetSurfaceResizing(JNIEnv*, jclass,
+                                                                                                   jboolean resizing) {
+  aurora::window::set_surface_resizing(resizing == JNI_TRUE);
 }
 #endif

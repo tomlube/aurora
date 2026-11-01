@@ -746,7 +746,10 @@ static wgpu::BackendType to_wgpu_backend(AuroraBackend backend) {
   }
 }
 
-static void release_surface_locked() noexcept { g_surface = {}; }
+static void release_surface_locked() noexcept {
+  g_surface = {};
+  window::clear_surface_lost();
+}
 
 static bool create_surface() {
   SDL_Window* window = window::get_sdl_window();
@@ -1146,7 +1149,7 @@ bool refresh_surface(bool recreate) {
     return false;
   }
   if (!window::is_presentable()) {
-    {
+    if (window::surface_needs_release()) {
       window::SurfaceLock surfaceLock;
       release_surface_locked();
     }

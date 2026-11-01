@@ -7,6 +7,7 @@ import org.libsdl.app.SDLSurface;
 
 public class AuroraSurface extends SDLSurface {
     private static native void nativeSetSurfaceReady(boolean ready);
+    private static native void nativeSetSurfaceResizing(boolean resizing);
 
     public AuroraSurface(Context context) {
         super(context);
@@ -26,8 +27,11 @@ public class AuroraSurface extends SDLSurface {
 
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        // Same native window, new size: native code keeps its GPU surface and reconfigures it.
+        nativeSetSurfaceResizing(true);
         nativeSetSurfaceReady(false);
         super.surfaceChanged(holder, format, width, height);
         nativeSetSurfaceReady(mIsSurfaceReady);
+        nativeSetSurfaceResizing(false);
     }
 }
