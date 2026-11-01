@@ -1303,7 +1303,10 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
     }
     if (tcg.type == GX_TG_MTX3x4) {
       vtxXfrAttrs += fmt::format("\n    out.tex{0}_uvw = tc{0}_proj.xyz;", i);
-      fragmentFnPre += fmt::format("\n    var tex{0}_uv = in.tex{0}_uvw.xy / in.tex{0}_uvw.z;", i);
+      // Adreno 5xx drivers fail to compile a struct member + vector component extract from the
+      // fragment input (e.g. in.tex0_uvw.z), so take the member first.
+      fragmentFnPre += fmt::format(
+          "\n    let tex{0}_uvw = in.tex{0}_uvw;\n    var tex{0}_uv = tex{0}_uvw.xy / tex{0}_uvw.z;", i);
     } else {
       vtxXfrAttrs += fmt::format("\n    out.tex{0}_uv = tc{0}_proj.xy;", i);
       fragmentFnPre += fmt::format("\n    var tex{0}_uv = in.tex{0}_uv.xy;", i);
@@ -1549,7 +1552,9 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
         "}";
     uniBufAttrs += "\n    fog: Fog,";
 
-    const std::string_view fogDepth = UseReversedZ ? "(1.0 - in.pos.z)" : "in.pos.z";
+    // See tex{N}_uvw above: read components from a copy of in.pos rather than from in directly.
+    fragmentFn += "\n    let frag_pos = in.pos;";
+    const std::string_view fogDepth = UseReversedZ ? "(1.0 - frag_pos.z)" : "frag_pos.z";
     if ((config.fogType & 0x08) != 0) {
       fragmentFn += fmt::format("\n    // Orthographic fog\n    var fogBase = ubuf.fog.a * {};", fogDepth);
     } else {
@@ -1557,7 +1562,7 @@ std::string build_shader_source(const ShaderConfig& config, DstAlphaMode dstAlph
           fmt::format("\n    // Perspective fog\n    var fogBase = ubuf.fog.a / (ubuf.fog.b - {});", fogDepth);
     }
     if (config.fogRangeEnabled) {
-      fragmentFn += "\n        fogBase *= bitcast<f32>(abuf[imm.fog_range_base + u32(in.pos.x)]);";
+      fragmentFn += "\n        fogBase *= bitcast<f32>(abuf[imm.fog_range_base + u32(frag_pos.x)]);";
     }
     fragmentFn += "\n    var fogF = clamp(fogBase - ubuf.fog.c, 0.0, 1.0);";
     switch (config.fogType) {
