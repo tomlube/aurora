@@ -150,7 +150,7 @@ AuroraInfo initialize(int argc, char* argv[], const AuroraConfig& config) noexce
       if (!window::create_window(selectedBackend)) {
         continue;
       }
-      if (webgpu::initialize(selectedBackend, config.allowCpuAdapter)) {
+      if (webgpu::initialize(selectedBackend, config.allowCpuAdapter, true)) {
         windowCreated = true;
         break;
       } else {

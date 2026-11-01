@@ -62,7 +62,7 @@ extern bool g_astcTexturesSupported;
 extern bool g_textureComponentSwizzleSupported;
 extern bool g_dualSourceBlendingSupported;
 
-bool initialize(AuroraBackend backend, bool allowCpu);
+bool initialize(AuroraBackend backend, bool allowCpu, bool autoSelected = false);
 void shutdown();
 void release_surface() noexcept;
 bool refresh_surface(bool recreate = true);

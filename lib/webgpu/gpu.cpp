@@ -767,7 +767,7 @@ static bool create_surface() {
   return true;
 }
 
-bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+bool initialize(AuroraBackend auroraBackend, bool allowCpu, bool autoSelected) {
   if (!g_instance) {
     Log.info("Creating WebGPU instance");
     const std::array requiredInstanceFeatures{
@@ -865,6 +865,20 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     Log.warn("Ignoring CPU adapter: {}", adapterName);
     g_adapterInfo = {};
     g_adapter = {};
+    return false;
+  }
+  // Adreno 5xx Vulkan drivers (e.g. Adreno 540, Android 9) crash or lose the device recording ordinary draws: the
+  // driver overflows its own constant storage in A5xCommandBuffer::FinalizeNamedConstantDescriptors. Fall through
+  // to the next backend (OpenGL ES) unless Vulkan was asked for explicitly.
+  if (autoSelected && backend == wgpu::BackendType::Vulkan &&
+      std::string_view{adapterName}.starts_with("Adreno (TM) 5")) {
+    Log.warn("Skipping Vulkan on {}: its driver is unreliable", adapterName);
+    g_adapterInfo = {};
+    g_adapter = {};
+    {
+      window::SurfaceLock surfaceLock;
+      release_surface_locked();
+    }
     return false;
   }
   auto description = g_adapterInfo.description;
